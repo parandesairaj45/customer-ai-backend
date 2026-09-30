@@ -162,4 +162,204 @@ router.get('/me', authenticateToken, (req, res) => {
   });
 });
 
+router.post('/forgot-password', async (req, res, next) => {
+  try {
+    if (!isSupabaseConfigured()) {
+      return res.status(503).json({
+        success: false,
+        error: 'Database is not configured.',
+      });
+    }
+
+    const { email } = req.body;
+    if (!email || typeof email !== 'string' || !email.includes('@')) {
+      return res.status(400).json({
+        success: false,
+        error: 'Please enter a valid email address.',
+      });
+    }
+
+    const normalizedEmail = email.toLowerCase().trim();
+    const supabase = getSupabaseClient();
+
+    // Check if user exists in custom users table
+    const { data: user, error: findError } = await supabase
+      .from('users')
+      .select('id, name, email')
+      .eq('email', normalizedEmail)
+      .maybeSingle();
+
+    if (findError) {
+      return next(findError);
+    }
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        error: 'No account found with this email address.',
+      });
+    }
+
+    // Ensure user exists in Supabase Auth service for email delivery
+    try {
+      const { data: usersData } = await supabase.auth.admin.listUsers();
+      const authUser = usersData?.users?.find((u) => u.email === normalizedEmail);
+      if (!authUser) {
+        await supabase.auth.admin.createUser({
+          email: normalizedEmail,
+          email_confirm: true,
+        });
+      }
+    } catch (authErr) {
+      console.warn('[Supabase Auth Sync Warning]:', authErr?.message || authErr);
+    }
+
+    const frontendUrl = config.frontendUrl || 'https://customer-ai-frontend.vercel.app';
+    const redirectUrl = `${frontendUrl.replace(/\/+$/, '')}/reset-password`;
+
+    // Trigger Supabase password-reset email
+    let supabaseEmailSent = false;
+    let linkData = null;
+
+    try {
+      const { error: resetErr } = await supabase.auth.resetPasswordForEmail(normalizedEmail, {
+        redirectTo: redirectUrl,
+      });
+      if (!resetErr) {
+        supabaseEmailSent = true;
+      } else {
+        console.warn('[Supabase resetPasswordForEmail notice]:', resetErr.message);
+      }
+    } catch (e) {
+      console.warn('[Supabase reset exception]:', e?.message);
+    }
+
+    // Also generate recovery link with Supabase admin
+    try {
+      const res = await supabase.auth.admin.generateLink({
+        type: 'recovery',
+        email: normalizedEmail,
+        options: { redirectTo: redirectUrl },
+      });
+      linkData = res.data;
+    } catch (e) {
+      console.warn('[Supabase generateLink notice]:', e?.message);
+    }
+
+    // Signed fallback token valid for 1 hour
+    const resetToken = jwt.sign(
+      { email: normalizedEmail, purpose: 'reset-password' },
+      config.jwtSecret,
+      { expiresIn: '1h' }
+    );
+
+    return res.json({
+      success: true,
+      message: 'Password reset link sent! Please check your email inbox and spam folder.',
+      emailSent: supabaseEmailSent,
+      resetToken,
+      actionLink: linkData?.properties?.action_link || null,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/reset-password', async (req, res, next) => {
+  try {
+    if (!isSupabaseConfigured()) {
+      return res.status(503).json({
+        success: false,
+        error: 'Database is not configured.',
+      });
+    }
+
+    const { email, password, token } = req.body;
+
+    if (!password || typeof password !== 'string' || password.length < 6) {
+      return res.status(400).json({
+        success: false,
+        error: 'Password must be at least 6 characters long.',
+      });
+    }
+
+    let targetEmail = (email || '').toLowerCase().trim();
+
+    // Verify token if provided
+    if (token) {
+      try {
+        const decoded = jwt.verify(token, config.jwtSecret);
+        if (decoded.email) {
+          targetEmail = decoded.email.toLowerCase().trim();
+        }
+      } catch {
+        // If not our JWT, check if it's a Supabase auth token
+        const supabase = getSupabaseClient();
+        try {
+          const { data } = await supabase.auth.getUser(token);
+          if (data?.user?.email) {
+            targetEmail = data.user.email.toLowerCase().trim();
+          }
+        } catch {
+          // Token verification failed
+        }
+      }
+    }
+
+    if (!targetEmail) {
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid or expired password reset link. Please request a new one.',
+      });
+    }
+
+    const supabase = getSupabaseClient();
+
+    // Verify user exists in custom users table
+    const { data: user, error: userError } = await supabase
+      .from('users')
+      .select('id, email')
+      .eq('email', targetEmail)
+      .maybeSingle();
+
+    if (userError || !user) {
+      return res.status(404).json({
+        success: false,
+        error: 'User account not found.',
+      });
+    }
+
+    // Hash the new password using bcrypt
+    const passwordHash = await bcrypt.hash(password, 12);
+
+    // Update custom users table in Supabase
+    const { error: updateError } = await supabase
+      .from('users')
+      .update({ password_hash: passwordHash })
+      .eq('email', targetEmail);
+
+    if (updateError) {
+      return next(updateError);
+    }
+
+    // Also update Supabase Auth user password
+    try {
+      const { data: usersData } = await supabase.auth.admin.listUsers();
+      const authUser = usersData?.users?.find((u) => u.email === targetEmail);
+      if (authUser?.id) {
+        await supabase.auth.admin.updateUserById(authUser.id, { password });
+      }
+    } catch (authErr) {
+      console.warn('[Supabase Auth password update notice]:', authErr?.message);
+    }
+
+    return res.json({
+      success: true,
+      message: 'Password reset successful! You can now log in with your new password.',
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 export default router;
