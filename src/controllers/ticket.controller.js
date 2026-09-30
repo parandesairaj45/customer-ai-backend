@@ -35,6 +35,7 @@ export const createTicket = async (req, res, next) => {
           ai_priority: aiAnalysis.priority,
           ai_sentiment: aiAnalysis.sentiment,
           ai_recommended_action: aiAnalysis.recommendedAction,
+          resolution_notes: aiAnalysis.customerResponse,
           status: 'open',
         },
       ])
@@ -49,10 +50,15 @@ export const createTicket = async (req, res, next) => {
       });
     }
 
+    const enrichedTicket = {
+      ...ticket,
+      ai_customer_response: aiAnalysis.customerResponse || ticket.resolution_notes,
+    };
+
     return res.status(201).json({
       success: true,
-      message: 'Ticket created and analyzed successfully.',
-      ticket,
+      message: 'Customer experience feedback created and analyzed successfully.',
+      ticket: enrichedTicket,
     });
   } catch (error) {
     next(error);
@@ -86,9 +92,14 @@ export const getMyTickets = async (req, res, next) => {
       });
     }
 
+    const enrichedTickets = (tickets || []).map((t) => ({
+      ...t,
+      ai_customer_response: t.resolution_notes,
+    }));
+
     return res.status(200).json({
       success: true,
-      tickets: tickets || [],
+      tickets: enrichedTickets,
     });
   } catch (error) {
     next(error);
@@ -182,9 +193,14 @@ export const getTicketById = async (req, res, next) => {
       }));
     }
 
+    const enrichedTicket = {
+      ...ticket,
+      ai_customer_response: ticket.resolution_notes,
+    };
+
     return res.status(200).json({
       success: true,
-      ticket,
+      ticket: enrichedTicket,
       messages,
     });
   } catch (error) {

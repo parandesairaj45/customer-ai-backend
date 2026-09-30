@@ -46,7 +46,12 @@ router.get('/all', async (req, res, next) => {
       return res.status(500).json({ success: false, error: 'Failed to fetch tickets' });
     }
 
-    return res.json({ success: true, tickets: tickets || [] });
+    const enriched = (tickets || []).map((t) => ({
+      ...t,
+      ai_customer_response: t.resolution_notes,
+    }));
+
+    return res.json({ success: true, tickets: enriched });
   } catch (err) {
     next(err);
   }

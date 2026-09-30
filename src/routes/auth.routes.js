@@ -134,6 +134,24 @@ router.post('/login', async (req, res, next) => {
       });
     }
 
+    // Respect selected role and persist in database as source of truth
+    if (req.body.role) {
+      const requestedRole =
+        req.body.role === 'support_agent' || req.body.role === 'agent' || req.body.role === 'support'
+          ? 'support_agent'
+          : req.body.role === 'customer'
+          ? 'customer'
+          : null;
+
+      if (requestedRole && user.role !== requestedRole) {
+        await supabase
+          .from('users')
+          .update({ role: requestedRole })
+          .eq('id', user.id);
+        user.role = requestedRole;
+      }
+    }
+
     const safeUser = {
       id: user.id,
       name: user.name,
